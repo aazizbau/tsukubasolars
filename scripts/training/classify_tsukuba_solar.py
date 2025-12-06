@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Tuple
 
 import fiona
 import numpy as np
 import rasterio
+import joblib
 from rasterio.warp import transform
-from rasterio.windows import Window
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 
@@ -31,13 +31,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--samples",
         type=Path,
-        default=Path("map/tsukuba_solarlabel_gp.gpkg"),
+        default=Path("map/tsukubasolar100labels_with_background.gpkg"),
         help="GeoPackage with labeled point samples.",
     )
     parser.add_argument(
         "--layer",
         type=str,
-        default="tsukuba_solar",
+        default="tsukubasolar_augmented",
         help="Layer name inside the GeoPackage.",
     )
     parser.add_argument(
@@ -67,8 +67,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("E:/data/tsukuba_alphaearth_2024_solar_mask.tif"),
-        help="Output classification GeoTIFF path.",
+        default=Path("map/tsukuba_solarpanel_class.tif"),
+        help="Output classification GeoTIFF path (uint8 mask).",
+    )
+    parser.add_argument(
+        "--prob-output",
+        type=Path,
+        default=Path("map/tsukuba_solarpanel_prob.tif"),
+        help="Optional probability GeoTIFF path (float32).",
+    )
+    parser.add_argument(
+        "--model-output",
+        type=Path,
+        default=Path("models/solar_classifier_model.joblib"),
+        help="Path to save the trained model.",
+    )
+    parser.add_argument(
+        "--prob-threshold",
+        type=float,
+        default=0.5,
+        help="Probability threshold to convert to class mask.",
     )
     return parser.parse_args()
 
@@ -108,7 +126,24 @@ def load_training_samples(
             geom = feat.get("geometry")
             if not geom or geom.get("type") != "Point":
                 continue
-            x, y = geom["coordinates"]
+            coords = geom.get("coordinates")
+            if coords is None:
+                continue
+            # Handle 2D or 3D point coordinates; discard Z if present.
+            if isinstance(coords, (list, tuple)):
+                if len(coords) >= 2 and not isinstance(coords[0], (list, tuple)):
+                    x, y = coords[0], coords[1]
+                elif len(coords) and isinstance(coords[0], (list, tuple)):
+                    # Fallback for unexpected nesting: grab first pair.
+                    first = coords[0]
+                    if len(first) >= 2:
+                        x, y = first[0], first[1]
+                    else:
+                        continue
+                else:
+                    continue
+            else:
+                continue
             x, y = reproject_point(x, y, src_crs, dataset.crs)
 
             pixel_values = next(dataset.sample([(x, y)])).astype(np.float32)
@@ -155,13 +190,25 @@ def classify_raster(
     dataset: rasterio.io.DatasetReader,
     model,
     output_path: Path,
+    prob_output_path: Path | None = None,
+    prob_threshold: float = 0.5,
 ) -> None:
     """Apply the trained model to every pixel and write the classification raster."""
     meta = dataset.meta.copy()
     meta.update(count=1, dtype="uint8", nodata=0)
 
+    prob_meta = None
+    if prob_output_path:
+        prob_meta = dataset.meta.copy()
+        prob_meta.update(count=1, dtype="float32", nodata=None)
+        prob_output_path.parent.mkdir(parents=True, exist_ok=True)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(output_path, "w", **meta) as dst:
+    with rasterio.open(output_path, "w", **meta) as dst_class, (
+        rasterio.open(prob_output_path, "w", **prob_meta)
+        if prob_meta
+        else rasterio.Env()
+    ) as dst_prob:
         for idx, (block_index, window) in enumerate(dataset.block_windows(1), start=1):
             block_data = dataset.read(window=window).astype(np.float32)
             bands, height, width = block_data.shape
@@ -176,13 +223,34 @@ def classify_raster(
                     valid_mask &= ~np.all(flat == nodata, axis=1)
 
             predictions = np.zeros(flat.shape[0], dtype=np.uint8)
+            probabilities = (
+                np.zeros(flat.shape[0], dtype=np.float32) if prob_output_path else None
+            )
+
             if np.any(valid_mask):
-                preds = model.predict(flat[valid_mask])
-                preds = np.asarray(preds, dtype=np.uint8)
+                if prob_output_path and hasattr(model, "predict_proba"):
+                    prob_vals = model.predict_proba(flat[valid_mask])[:, 1]
+                elif prob_output_path:
+                    prob_vals = model.predict(flat[valid_mask]).astype(np.float32)
+                else:
+                    prob_vals = None
+
+                if prob_vals is not None and probabilities is not None:
+                    probabilities[valid_mask] = prob_vals.astype(np.float32)
+                    preds = (probabilities[valid_mask] >= prob_threshold).astype(
+                        np.uint8
+                    )
+                else:
+                    preds = np.asarray(model.predict(flat[valid_mask]), dtype=np.uint8)
                 predictions[valid_mask] = preds
 
             predictions = predictions.reshape(height, width)
-            dst.write(predictions, 1, window=window)
+            dst_class.write(predictions, 1, window=window)
+
+            if prob_output_path and probabilities is not None and dst_prob:
+                dst_prob.write(
+                    probabilities.reshape(height, width), 1, window=window
+                )
 
             if idx % 50 == 0:
                 print(f"Processed {idx} windows ...")
@@ -199,9 +267,21 @@ def main() -> None:
         print(f"Training {args.model} classifier ...")
         model = build_model(args)
         model.fit(X, y)
+        args.model_output.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, args.model_output)
+        print(f"Model saved: {args.model_output}")
+
         print("Model trained. Classifying raster ...")
-        classify_raster(dataset, model, args.output)
+        classify_raster(
+            dataset,
+            model,
+            args.output,
+            prob_output_path=args.prob_output,
+            prob_threshold=args.prob_threshold,
+        )
     print(f"Saved classification raster to {args.output}")
+    if args.prob_output:
+        print(f"Saved probability raster to {args.prob_output}")
 
 
 if __name__ == "__main__":

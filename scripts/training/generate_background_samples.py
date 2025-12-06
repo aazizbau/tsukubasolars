@@ -30,13 +30,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--positives",
         type=Path,
-        default=Path("map/tsukuba_solarlabel_gp.gpkg"),
+        default=Path("map/tsukubasolar100label_gp.gpkg"),
         help="GeoPackage containing positive solar panel points.",
     )
     parser.add_argument(
         "--layer",
         type=str,
-        default="tsukuba_solarlabel",
+        default="tsukubasolar100",
         help="Layer name for the positive samples.",
     )
     parser.add_argument(
@@ -121,7 +121,11 @@ def load_positive_pixels(
             geom = feat.get("geometry")
             if not geom or geom.get("type") != "Point":
                 continue
-            x, y = geom["coordinates"]
+            coords = geom.get("coordinates")
+            if not coords or len(coords) < 2:
+                continue
+            x, y = coords[:2]
+
             rx, ry = reproject_point(x, y, src_crs, dataset.crs)
             col, row = dataset.index(rx, ry)
             if row < 0 or row >= dataset.height or col < 0 or col >= dataset.width:
