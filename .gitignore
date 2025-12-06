@@ -16,6 +16,7 @@ map/*.gpkg
 *.tiff
 *.aux.xml
 *.geojson
+*.qgz
 E:/data/
 
 # IDE/OS
