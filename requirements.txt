@@ -3,3 +3,6 @@ geemap
 rasterio
 fiona
 scikit-learn
+geopandas
+pyogrio
+shapely
