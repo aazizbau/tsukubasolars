@@ -1,0 +1,3 @@
+version,accuracy,precision,recall,f1,tn,fp,fn,tp
+before,0.9541,0.9057,0.9600,0.9320,195,10,4,96
+after,0.9541,0.9057,0.9600,0.9320,195,10,4,96
