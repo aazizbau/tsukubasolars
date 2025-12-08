@@ -6,3 +6,5 @@ scikit-learn
 geopandas
 pyogrio
 shapely
+torch
+pytorch-tabnet
