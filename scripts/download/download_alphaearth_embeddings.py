@@ -35,7 +35,7 @@ def initialize_earth_engine(project: str | None = None) -> None:
     except ee.EEException:
         print("Authenticating to Google Earth Engine ...")
         ee.Authenticate()
-        ee.Initialize(project='ee-lulc-aazizbau')
+        ee.Initialize(project=project)
     else:
         print("Google Earth Engine initialized.")
 
